@@ -593,8 +593,12 @@
            denenebilsin diye. <source> alt etiketleri kullanılmıyor; Tizen onları
            atlayabiliyor ve o durumda video elementinin 'error' olayı hiç tetiklenmiyor.
            poster: oynatma başlamazsa ekran boş kalmaz. -->
+      <!-- playsinline'ın üç yazımı da bilerek duruyor: modern tarayıcılar
+           "playsinline"ı, eski WebKit tabanlı TV tarayıcıları (Samsung Tizen)
+           "webkit-playsinline"ı okur. Biri eksikse video kendi tam ekran
+           oynatıcısına geçip sayfanın tamamını kaplar. -->
       <video class="anchor-video" id="anchorVideo"
-             autoplay muted loop playsinline
+             autoplay muted loop playsinline webkit-playsinline x5-playsinline
              preload="auto" disablepictureinpicture aria-hidden="true"></video>
       <div class="photo-fallback" id="photoFallback">
         <svg viewBox="0 0 24 24"><use href="#i-shield"></use></svg>
@@ -806,6 +810,52 @@
       document.addEventListener(ev, tryPlay, {once:false, passive:true}));
 
     loadSource(0);
+  })();
+
+  /* ══════════════════ VİDEO TAM EKRANA KAÇMASIN ══════════════════
+     Belirti: bir süre sonra spiker tüm ekranı kaplıyor, ekrana dokununca düzeliyor.
+     Sebep: TV tarayıcısı videoyu kendi yerleşik tam ekran oynatıcısına alıyor.
+     Eski WebKit'te bunu engelleyen öznitelik "webkit-playsinline" (yukarıda
+     eklendi); yine de bazı durumlarda (döngü başa sarınca, ses açılınca, güç
+     tasarrufundan dönünce) tetiklenebiliyor. Aşağısı bunu olay bazlı yakalayıp
+     geri çıkarıyor ve 5 saniyede bir de kontrol ediyor — kullanıcı dokunmasa da
+     kendi kendine düzelsin diye (ekran 7/24 başında kimse olmadan çalışıyor).
+
+     DİKKAT: sayfanın kendi tam ekranı (çift tıkla açılan) bozulmamalı. Bu yüzden
+     yalnızca tam ekrana geçen öğe VIDEO ise müdahale ediliyor. */
+  (function keepVideoInline(){
+    if(!anchorVideo) return;
+
+    const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement
+                    || document.webkitCurrentFullScreenElement || document.mozFullScreenElement
+                    || document.msFullscreenElement || null;
+
+    function exitVideoFullscreen(){
+      // iOS/WebKit tarzı: video kendi oynatıcısında
+      try {
+        if(anchorVideo.webkitDisplayingFullscreen && anchorVideo.webkitExitFullscreen){
+          anchorVideo.webkitExitFullscreen();
+        }
+      } catch(e){}
+      // Standart API: yalnızca tam ekrandaki öğe video ise çık
+      const el = fsEl();
+      if(el && el.tagName === 'VIDEO'){
+        try {
+          (document.exitFullscreen || document.webkitExitFullscreen ||
+           document.webkitCancelFullScreen || document.mozCancelFullScreen ||
+           document.msExitFullscreen || function(){}).call(document);
+        } catch(e){}
+      }
+    }
+
+    ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange']
+      .forEach(ev => document.addEventListener(ev, exitVideoFullscreen));
+    // WebKit videoyu tam ekrana alırken bunu yayınlar — en erken yakalama noktası
+    ['webkitbeginfullscreen','enterpictureinpicture']
+      .forEach(ev => anchorVideo.addEventListener(ev, exitVideoFullscreen));
+
+    // Olay hiç gelmezse diye ağsız, ucuz nöbetçi
+    setInterval(exitVideoFullscreen, 5000);
   })();
 
   /* ══════════════════ YAYIN SESİ (MP3) ══════════════════
@@ -1134,10 +1184,34 @@
 
   /* ---------- 1920×1080 sahneyi her ekrana orantılı sığdır ---------- */
   function fitStage(){
+    // Ölçü alınamayan bir anda (TV uykudan dönerken 0 raporlayabiliyor) sahneyi
+    // bozmayalım; bir sonraki turda düzelir.
+    if(!innerWidth || !innerHeight) return;
     const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+    if(!(s > 0)) return;
     document.getElementById('stage').style.transform = `scale(${s})`;
   }
   window.addEventListener('resize', fitStage);
+  window.addEventListener('orientationchange', fitStage);
+  document.addEventListener('visibilitychange', () => { if(!document.hidden) fitStage(); });
+
+  /* Düzen nöbetçisi — 7/24 çalışan ekran için. Video kutusundan taşıp sayfayı
+     kaplarsa (tam ekrana kaçma, uykudan dönüşte bozulan yerleşim vb.) kimse
+     ekrana dokunmadan kendi kendine toparlansın. Sadece ölçüm yapar, ağ isteği yok. */
+  setInterval(() => {
+    fitStage();
+    const v = document.getElementById('anchorVideo');
+    const wrap = document.querySelector('.photo-wrap');
+    if(!v || !wrap || v.style.display === 'none') return;
+    const vr = v.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+    // Video kapsayıcısının belirgin biçimde dışına taşmışsa yerleşimi zorla tazele
+    if(wr.width > 0 && vr.width > wr.width * 1.5){
+      v.style.width = v.style.height = '';
+      v.style.position = 'absolute';
+      void v.offsetWidth;                      // reflow
+      fitStage();
+    }
+  }, 5000);
 
   /* ---------- entrance replay loop (TV mode) ---------- */
   function replayIntro(){
@@ -1376,6 +1450,35 @@
     document.getElementById('clock').textContent = `${p(n.getHours())}:${p(n.getMinutes())}:${p(n.getSeconds())}`;
   }
   setInterval(clock, 1000); clock();
+
+  /* ══════════════════ OTOMATİK YENİLEME ══════════════════
+     Ekran 7/24 başında kimse olmadan çalışıyor. Uzun süre açık kalınca TV
+     tarayıcısı videoyu tam ekrana alabiliyor ya da yerleşim bozulabiliyor;
+     elle yenilemek bunu kesin olarak düzeltiyor. Aşağısı aynı şeyi kendiliğinden
+     yapar. Yan fayda: repoya yeni yayın dosyası atıldığında ekran onu da alır.
+
+     Süreyi değiştirmek için tek yer burası; 0 yazarsanız özellik kapanır.
+     Bedeli: yenilemede video ve ses baştan başlar (birkaç saniyelik kesinti). */
+  const RELOAD_MINUTES = 15;
+
+  (function autoReload(){
+    if(!(RELOAD_MINUTES > 0)) return;
+    // Düzenleme ekranında ASLA yenileme — form doldurulurken veri uçar
+    if(new URLSearchParams(location.search).get('edit') === '1') return;
+
+    (function schedule(){
+      setTimeout(() => {
+        const setup = document.getElementById('setup');
+        if(setup && setup.style.display !== 'none'){ schedule(); return; }  // kurulum açıksa ertele
+        /* Sorgu dizesi tazeleniyor: TV'nin HTML'i önbellekten servis etmesi
+           daha önce başımıza gelmişti, düz reload() buna takılabiliyor.
+           Mevcut parametreler (ör. debug) korunur. */
+        const p = new URLSearchParams(location.search);
+        p.set('r', Date.now());
+        location.replace(location.pathname + '?' + p.toString());
+      }, RELOAD_MINUTES * 60000);
+    })();
+  })();
 
   /* ---------- fullscreen on double-click (TV) ---------- */
   document.getElementById('dashboard').addEventListener('dblclick', () => {
